@@ -178,9 +178,12 @@ function stats_cron_daily($maxdays=1) {
 
         $daystart = time();
 
-        $timesql  = "l.time >= $timestart  AND l.time  < $nextmidnight";
-        $timesql1 = "l1.time >= $timestart AND l1.time < $nextmidnight";
-        $timesql2 = "l2.time >= $timestart AND l2.time < $nextmidnight";
+        mtrace("...creating logs temporary table: ", false);
+        if ( !stats_create_logs_view($timestart, $nextmidnight) ) {
+            mtrace("ERROR");
+            return false;
+        }
+        mtrace("OK");
 
         stats_daily_progress('init');
 
@@ -495,6 +498,8 @@ function stats_cron_daily($maxdays=1) {
 
         $timestart    = $nextmidnight;
         $nextmidnight = stats_get_next_day_start($nextmidnight);
+
+        stats_drop_log_temp();
     }
 
     set_cron_lock('statsrunning', null);
@@ -1385,4 +1390,70 @@ function stats_check_uptodate($courseid=0) {
 
     //return error as string
     return get_string('statscatchupmode','error',$a);
+}
+
+/**
+ * Creates tmp log table
+ * @param timestart timestamp of the start time of logs view 
+ * @param timeend timestamp of the end time of logs view 
+ * @returns boolen success (true) or failure(false)
+ */ 
+function stats_create_logs_view ( $timestart, $timeend ) {
+    global $CFG, $DB;
+
+    $dbman = $DB->get_manager(); // We are going to use database_manager services
+    
+    if ( $dbman->table_exists('tmp_stats_log') ) {
+        $table = new xmldb_table('tmp_stats_log');
+        $dbman->drop_table($table);
+    }
+
+    $table = new xmldb_table('tmp_stats_log');
+
+    $table->add_field('id', XMLDB_TYPE_INTEGER, '10', XMLDB_UNSIGNED, XMLDB_NOTNULL, null, null);
+    $table->add_field('time', XMLDB_TYPE_INTEGER, '10', XMLDB_UNSIGNED, XMLDB_NOTNULL, null, null);
+    $table->add_field('userid', XMLDB_TYPE_INTEGER, '10', XMLDB_UNSIGNED, XMLDB_NOTNULL, null, null);
+    $table->add_field('ip', XMLDB_TYPE_CHAR, '45', null, XMLDB_NOTNULL, null, null);
+    $table->add_field('course', XMLDB_TYPE_INTEGER, '10', XMLDB_UNSIGNED, XMLDB_NOTNULL, null, null);
+    $table->add_field('module', XMLDB_TYPE_CHAR, '20', null, XMLDB_NOTNULL, null, null);
+    $table->add_field('cmid', XMLDB_TYPE_INTEGER, '10', XMLDB_UNSIGNED, XMLDB_NOTNULL, null, null);
+    $table->add_field('action', XMLDB_TYPE_CHAR, '40', null, XMLDB_NOTNULL, null, null);
+    $table->add_field('url', XMLDB_TYPE_CHAR, '100', null, XMLDB_NOTNULL, null, null);
+    $table->add_field('info', XMLDB_TYPE_CHAR, '255', null, XMLDB_NOTNULL, null, null);
+
+    $table->add_key('primary', XMLDB_KEY_PRIMARY, array('id'));
+    $table->add_index('tmp_stats_log_tim_ix', XMLDB_INDEX_NOTUNIQUE, array('time'));
+    $table->add_index('tmp_stats_log_course_ix', XMLDB_INDEX_NOTUNIQUE, array('course'));
+    $table->add_index('tmp_stats_log_act_ix', XMLDB_INDEX_NOTUNIQUE, array('action'));
+    $table->add_index('tmp_stats_log_user_ix', XMLDB_INDEX_NOTUNIQUE, array('userid'));
+    $table->add_index('tmp_stats_log_usecouact_ix', XMLDB_INDEX_NOTUNIQUE, array('userid','course','action'));
+
+    // Not using temporary table because "You cannot refer to a TEMPORARY table more than once in the same query"
+    // with MySQL 5.x
+    $dbman->create_table($table);
+
+    $sql = "INSERT INTO {tmp_stats_log} 
+                SELECT * FROM {log} l
+                WHERE l.time >= $timestart AND l.time < $timeend";
+
+    if (!$DB->execute($sql)) {
+       return false;
+    }
+
+    return true;
+}
+
+/**
+ * Deletes summary logs table for stats calculation
+ */
+
+function stats_drop_log_temp() {
+    global $DB;
+
+    $dbman = $DB->get_manager(); 
+    
+    if ( $dbman->table_exists('tmp_stats_log') ) {
+        $table = new xmldb_table('tmp_stats_log');
+        $dbman->drop_table($table);
+    }
 }
