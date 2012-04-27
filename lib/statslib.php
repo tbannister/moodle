@@ -182,21 +182,38 @@ function stats_cron_daily($maxdays=1) {
 
         stats_daily_progress('init');
 
-
     /// find out if any logs available for this day
-        $sql = "SELECT 'x'
-                  FROM {log} l
-                 WHERE $timesql";
+        $sql = "SELECT 'x' FROM {log} l WHERE $timesql";
         $logspresent = $DB->get_records_sql($sql, null, 0, 1);
+
+        if ($logspresent) {
+            mtrace('Creating temporary table...');
+            // drop first, this will fail sometimes
+            try {
+                $DB->execute('DROP TABLE {log_temp}');
+            }
+            catch (dml_exception $e) {}
+            $sql = "CREATE TEMPORARY TABLE {log_temp} AS (SELECT course, userid, action FROM {log} l WHERE $timesql)";
+            $status = $DB->execute($sql);
+            $status = $status && $DB->execute('CREATE INDEX logtmp_userid ON {log_temp} (userid)');
+            $status = $status && $DB->execute('CREATE INDEX logtmp_couusr ON {log_temp} (course, userid)');
+            $status = $status && $DB->execute('CREATE INDEX logtmp_action ON {log_temp} (action)');
+            $status = $status && $DB->execute('ANALYZE {log_temp}');
+            if (!$status) {
+                $failed = true;
+                break;
+            }
+            mtrace('Successfully built temp table');
+        }
 
     /// process login info first
         $sql = "INSERT INTO {stats_user_daily} (stattype, timeend, courseid, userid, statsreads)
 
                 SELECT 'logins', timeend, courseid, userid, count(statsreads)
                  FROM (
-                          SELECT $nextmidnight AS timeend, ".SITEID." AS courseid, l.userid, l.id AS statsreads
-                            FROM {log} l
-                           WHERE action = 'login' AND $timesql
+                          SELECT $nextmidnight AS timeend, ".SITEID." AS courseid, l.userid, 1 AS statsreads
+                            FROM {log_temp} l
+                           WHERE action = 'login'
                        ) inline_view
               GROUP BY timeend, courseid, userid
                 HAVING count(statsreads) > 0";
@@ -263,15 +280,14 @@ function stats_cron_daily($maxdays=1) {
                                   WHERE ra.roleid = {stats_daily}.roleid AND
                                        e.courseid = {stats_daily}.courseid AND
                                        EXISTS (SELECT 'x'
-                                                 FROM {log} l
+                                                 FROM {log_temp} l
                                                 WHERE l.course = {stats_daily}.courseid AND
-                                                      l.userid = ra.userid AND $timesql))
+                                                      l.userid = ra.userid))
                  WHERE {stats_daily}.stattype = 'enrolments' AND
                        {stats_daily}.timeend = $nextmidnight AND
                        {stats_daily}.courseid IN
                           (SELECT DISTINCT l.course
-                             FROM {log} l
-                            WHERE $timesql)";
+                             FROM {log_temp} l)";
 
         if (!$DB->execute($sql, array('courselevel'=>CONTEXT_COURSE))) {
             $failed = true;
@@ -303,16 +319,16 @@ function stats_cron_daily($maxdays=1) {
                                   JOIN {user_enrolments} ue ON ue.enrolid = e.id
                                  WHERE e.courseid = {stats_daily}.courseid AND
                                        EXISTS (SELECT 'x'
-                                                 FROM {log} l
+                                                 FROM {log_temp} l
                                                 WHERE l.course = {stats_daily}.courseid AND
-                                                      l.userid = ue.userid AND $timesql))
+                                                      l.userid = ue.userid))
                  WHERE {stats_daily}.stattype = 'enrolments' AND
                        {stats_daily}.timeend = $nextmidnight AND
                        {stats_daily}.roleid = 0 AND
                        {stats_daily}.courseid IN
                           (SELECT l.course
-                             FROM {log} l
-                            WHERE $timesql AND l.course <> ".SITEID.")";
+                             FROM {log_temp} l
+                            WHERE l.course <> ".SITEID.")";
 
         if ($logspresent and !$DB->execute($sql, array())) {
             $failed = true;
@@ -329,8 +345,8 @@ function stats_cron_daily($maxdays=1) {
                          WHERE u.deleted = 0) AS stat1,
                        (SELECT COUNT(DISTINCT u.id)
                           FROM {user} u
-                               JOIN {log} l ON l.userid = u.id
-                         WHERE u.deleted = 0 AND $timesql) AS stat2" .
+                               JOIN {log_temp} l ON l.userid = u.id
+                         WHERE u.deleted = 0) AS stat2" .
                 $DB->sql_null_from_clause();
 
         if ($logspresent and !$DB->execute($sql)) {
@@ -360,8 +376,8 @@ function stats_cron_daily($maxdays=1) {
                              WHERE u.deleted = 0) AS stat1,
                            (SELECT COUNT(DISTINCT u.id)
                               FROM {user} u
-                                   JOIN {log} l ON l.userid = u.id
-                             WHERE u.deleted = 0 AND $timesql) AS stat2" .
+                                   JOIN {log_temp} l ON l.userid = u.id
+                             WHERE u.deleted = 0) AS stat2" .
                     $DB->sql_null_from_clause();;
 
             if ($logspresent and !$DB->execute($sql)) {
@@ -384,18 +400,18 @@ function stats_cron_daily($maxdays=1) {
 
                 SELECT 'activity' AS stattype, $nextmidnight AS timeend, d.courseid, d.userid,
                        (SELECT COUNT('x')
-                          FROM {log} l
+                          FROM {log_temp} l
                          WHERE l.userid = d.userid AND
-                               l.course = d.courseid AND $timesql AND
+                               l.course = d.courseid AND
                                l.action $viewactionssql) AS statsreads,
                        (SELECT COUNT('x')
-                          FROM {log} l
+                          FROM {log_temp} l
                          WHERE l.userid = d.userid AND
-                               l.course = d.courseid AND $timesql AND
+                               l.course = d.courseid AND
                                l.action $postactionssql) AS statswrites
                   FROM (SELECT DISTINCT u.id AS userid, l.course AS courseid
-                          FROM {user} u, {log} l
-                         WHERE u.id = l.userid AND $timesql
+                          FROM {user} u, {log_temp} l
+                         WHERE u.id = l.userid
                        UNION
                         SELECT 0 AS userid, ".SITEID." AS courseid" . $DB->sql_null_from_clause() . ") d";
                         // can not use group by here because pg can not handle it :-(
@@ -412,17 +428,13 @@ function stats_cron_daily($maxdays=1) {
 
                 SELECT 'activity' AS stattype, $nextmidnight AS timeend, c.id AS courseid, 0,
                        (SELECT COUNT('x')
-                          FROM {log} l1
-                         WHERE l1.course = c.id AND l1.action $viewactionssql AND
-                               $timesql1) AS stat1,
+                          FROM {log_temp} l1
+                         WHERE l1.course = c.id AND l1.action $viewactionssql) AS stat1,
                        (SELECT COUNT('x')
-                          FROM {log} l2
-                         WHERE l2.course = c.id AND l2.action $postactionssql AND
-                               $timesql2) AS stat2
+                          FROM {log_temp} l2
+                         WHERE l2.course = c.id AND l2.action $postactionssql) AS stat2
                   FROM {course} c
-                 WHERE EXISTS (SELECT 'x'
-                                 FROM {log} l
-                                WHERE l.course = c.id and $timesql)";
+                 WHERE EXISTS (SELECT 'x' FROM {log_temp} l WHERE l.course = c.id)";
 
         if ($logspresent and !$DB->execute($sql, array_merge($params1, $params2))) {
             $failed = true;
