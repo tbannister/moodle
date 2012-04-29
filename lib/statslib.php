@@ -178,37 +178,15 @@ function stats_cron_daily($maxdays=1) {
 
         $daystart = time();
 
-        mtrace("...creating logs temporary table: ", false);
-        if ( !stats_create_logs_view($timestart, $nextmidnight) ) {
-            mtrace("ERROR");
-            return false;
-        }
-        mtrace("OK");
-
         stats_daily_progress('init');
 
     /// find out if any logs available for this day
-        $sql = "SELECT 'x' FROM {log} l WHERE $timesql";
+        $sql = "SELECT 'x' FROM {log} l WHERE time >= $timestart AND time < $nextmidnight";
         $logspresent = $DB->get_records_sql($sql, null, 0, 1);
 
-        if ($logspresent) {
-            // drop first, this will fail sometimes
-            try {
-                $DB->execute('DROP TABLE {log_temp}');
-            }
-            catch (dml_exception $e) {}
-            $sql = "CREATE TABLE {log_temp} AS (
-                    SELECT course, userid, action, COUNT('x') AS sum
-                    FROM {log} l WHERE $timesql AND course <> 0
-                    GROUP BY course, userid, action)";
-            $status = $DB->execute($sql);
-            $status = $status && $DB->execute('CREATE INDEX logtmp_userid ON {log_temp} (userid, course)');
-            $status = $status && $DB->execute('CREATE INDEX logtmp_couusr ON {log_temp} (course, userid)');
-            $status = $status && $DB->execute('CREATE INDEX logtmp_action ON {log_temp} (action, course, userid)');
-            if (!$status) {
-                $failed = true;
-                break;
-            }
+        if ($logspresent && !stats_create_log_temp($timestart, $nextmidnight)) {
+            $failed = true;
+            break;
         }
 
         stats_daily_progress('1');
@@ -292,9 +270,7 @@ function stats_cron_daily($maxdays=1) {
         }
         stats_daily_progress('5');
 
-        /// frontapge(==site) enrolments total
-        /// Default frontpage role enrolments are all site users (not deleted)
-
+    /// frontapge(==site) enrolments total
         $sql = "INSERT INTO {stats_daily} (stattype, timeend, courseid, roleid, stat1, stat2)
 
                 SELECT 'enrolments' AS stattype, $nextmidnight AS timeend, ".SITEID." AS courseid, 0 AS roleid,
@@ -308,9 +284,9 @@ function stats_cron_daily($maxdays=1) {
             $failed = true;
             break;
         }
-
         stats_daily_progress('6');
 
+    /// Default frontpage role enrolments are all site users (not deleted)
         if ($defaultfproleid) {
             $sql = "INSERT INTO {stats_daily} (stattype, timeend, courseid, roleid, stat1, stat2)
 
@@ -326,9 +302,7 @@ function stats_cron_daily($maxdays=1) {
                 break;
             }
         }
-
         stats_daily_progress('7');
-
 
     /// individual user stats (including not-logged-in) in each course
         $sql = "INSERT INTO {stats_user_daily} (stattype, timeend, courseid, userid, statsreads, statswrites)
@@ -348,7 +322,6 @@ function stats_cron_daily($maxdays=1) {
         }
         stats_daily_progress('8');
 
-
     /// how many view/post actions in each course total
         $sql = "INSERT INTO {stats_daily} (stattype, timeend, courseid, stat1, stat2)
 
@@ -364,9 +337,7 @@ function stats_cron_daily($maxdays=1) {
         }
         stats_daily_progress('9');
 
-
     /// how many view actions for each course+role - excluding guests and frontpage
-
         $sql = "INSERT INTO {stats_daily} (stattype, timeend, courseid, roleid, stat1, stat2)
 
                 SELECT 'activity' AS stattype, $nextmidnight AS timeend, x2.*
@@ -396,7 +367,6 @@ function stats_cron_daily($maxdays=1) {
 
     /// how many view actions from guests only in each course - excluding frontpage
     /// normal users may enter course with temporary guest access too
-
         $sql = "INSERT INTO {stats_daily} (stattype, timeend, courseid, roleid, stat1, stat2)
 
                 SELECT 'activity' AS stattype, $nextmidnight AS timeend, course, $guestrole AS roleid, stat1, stat2
@@ -421,7 +391,6 @@ function stats_cron_daily($maxdays=1) {
         }
         stats_daily_progress('11');
 
-
     /// how many view actions for each role on frontpage - excluding guests, not-logged-in and default frontpage role
         $sql = "INSERT INTO {stats_daily} (stattype, timeend, courseid, roleid, stat1, stat2)
 
@@ -445,7 +414,6 @@ function stats_cron_daily($maxdays=1) {
             break;
         }
         stats_daily_progress('12');
-
 
     /// how many view actions for default frontpage role on frontpage only
         $sql = "INSERT INTO {stats_daily} (stattype, timeend, courseid, roleid, stat1, stat2)
@@ -498,10 +466,9 @@ function stats_cron_daily($maxdays=1) {
 
         $timestart    = $nextmidnight;
         $nextmidnight = stats_get_next_day_start($nextmidnight);
-
-        stats_drop_log_temp();
     }
 
+    stats_drop_log_temp();
     set_cron_lock('statsrunning', null);
 
     if ($failed) {
@@ -1394,50 +1361,42 @@ function stats_check_uptodate($courseid=0) {
 
 /**
  * Creates tmp log table
- * @param timestart timestamp of the start time of logs view 
- * @param timeend timestamp of the end time of logs view 
+ * @param timestart timestamp of the start time of logs view
+ * @param timeend timestamp of the end time of logs view
  * @returns boolen success (true) or failure(false)
- */ 
-function stats_create_logs_view ( $timestart, $timeend ) {
-    global $CFG, $DB;
+ */
+function stats_create_log_temp($timestart, $timeend) {
+    global $DB;
 
-    $dbman = $DB->get_manager(); // We are going to use database_manager services
-    
-    if ( $dbman->table_exists('tmp_stats_log') ) {
-        $table = new xmldb_table('tmp_stats_log');
-        $dbman->drop_table($table);
-    }
+    stats_drop_log_temp();
 
-    $table = new xmldb_table('tmp_stats_log');
+    $dbman = $DB->get_manager();
+    $table = new xmldb_table('log_temp');
 
-    $table->add_field('id', XMLDB_TYPE_INTEGER, '10', XMLDB_UNSIGNED, XMLDB_NOTNULL, null, null);
-    $table->add_field('time', XMLDB_TYPE_INTEGER, '10', XMLDB_UNSIGNED, XMLDB_NOTNULL, null, null);
-    $table->add_field('userid', XMLDB_TYPE_INTEGER, '10', XMLDB_UNSIGNED, XMLDB_NOTNULL, null, null);
-    $table->add_field('ip', XMLDB_TYPE_CHAR, '45', null, XMLDB_NOTNULL, null, null);
     $table->add_field('course', XMLDB_TYPE_INTEGER, '10', XMLDB_UNSIGNED, XMLDB_NOTNULL, null, null);
-    $table->add_field('module', XMLDB_TYPE_CHAR, '20', null, XMLDB_NOTNULL, null, null);
-    $table->add_field('cmid', XMLDB_TYPE_INTEGER, '10', XMLDB_UNSIGNED, XMLDB_NOTNULL, null, null);
+    $table->add_field('userid', XMLDB_TYPE_INTEGER, '10', XMLDB_UNSIGNED, XMLDB_NOTNULL, null, null);
     $table->add_field('action', XMLDB_TYPE_CHAR, '40', null, XMLDB_NOTNULL, null, null);
-    $table->add_field('url', XMLDB_TYPE_CHAR, '100', null, XMLDB_NOTNULL, null, null);
-    $table->add_field('info', XMLDB_TYPE_CHAR, '255', null, XMLDB_NOTNULL, null, null);
+    $table->add_field('sum', XMLDB_TYPE_INTEGER, '10', XMLDB_UNSIGNED, XMLDB_NOTNULL, null, null);
 
-    $table->add_key('primary', XMLDB_KEY_PRIMARY, array('id'));
-    $table->add_index('tmp_stats_log_tim_ix', XMLDB_INDEX_NOTUNIQUE, array('time'));
-    $table->add_index('tmp_stats_log_course_ix', XMLDB_INDEX_NOTUNIQUE, array('course'));
-    $table->add_index('tmp_stats_log_act_ix', XMLDB_INDEX_NOTUNIQUE, array('action'));
-    $table->add_index('tmp_stats_log_user_ix', XMLDB_INDEX_NOTUNIQUE, array('userid'));
-    $table->add_index('tmp_stats_log_usecouact_ix', XMLDB_INDEX_NOTUNIQUE, array('userid','course','action'));
+    $dbman->create_temp_table($table);
 
-    // Not using temporary table because "You cannot refer to a TEMPORARY table more than once in the same query"
-    // with MySQL 5.x
-    $dbman->create_table($table);
+    $sql = "INSERT INTO {log_temp}
 
-    $sql = "INSERT INTO {tmp_stats_log} 
-                SELECT * FROM {log} l
-                WHERE l.time >= $timestart AND l.time < $timeend";
+            SELECT course, userid, action, COUNT('x') AS sum
+            FROM {log} WHERE time >= $timestart AND time < $timeend AND course <> 0
+            GROUP BY course, userid, action";
 
     if (!$DB->execute($sql)) {
-       return false;
+        return false;
+    }
+
+    $indexes = array();
+    $indexes[] = new xmldb_index('log_temp_course_ix', XMLDB_INDEX_NOTUNIQUE, array('course', 'userid'));
+    $indexes[] = new xmldb_index('log_temp_user_ix', XMLDB_INDEX_NOTUNIQUE, array('userid'));
+    $indexes[] = new xmldb_index('log_temp_actcouuse_ix', XMLDB_INDEX_NOTUNIQUE, array('action', 'course', 'userid'));
+
+    foreach ($indexes as $index) {
+        $dbman->add_index($table, $index);
     }
 
     return true;
@@ -1446,14 +1405,13 @@ function stats_create_logs_view ( $timestart, $timeend ) {
 /**
  * Deletes summary logs table for stats calculation
  */
-
 function stats_drop_log_temp() {
     global $DB;
 
-    $dbman = $DB->get_manager(); 
-    
-    if ( $dbman->table_exists('tmp_stats_log') ) {
-        $table = new xmldb_table('tmp_stats_log');
-        $dbman->drop_table($table);
+    $dbman = $DB->get_manager();
+
+    if ($dbman->table_exists('log_temp')) {
+        $table = new xmldb_table('log_temp');
+        $dbman->drop_temp_table($table);
     }
 }
