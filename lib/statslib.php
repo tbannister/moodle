@@ -80,12 +80,12 @@ function stats_daily_progress($ident) {
     static $init  = 0;
 
     if ($ident == 'init') {
-        $init = $start = time();
+        $init = $start = microtime(true);
         return;
     }
 
-    $elapsed = time() - $start;
-    $start   = time();
+    $elapsed = round(microtime(true) - $start);
+    $start   = microtime(true);
 
     if (debugging('', DEBUG_ALL)) {
         mtrace("$ident:$elapsed ", '');
@@ -149,6 +149,8 @@ function stats_cron_daily($maxdays=1) {
     // Read in a few things we'll use later
     $viewactions = stats_get_action_names('view');
     $postactions = stats_get_action_names('post');
+    list($viewactionssql, $params1) = $DB->get_in_or_equal($viewactions, SQL_PARAMS_NAMED, 'view');
+    list($postactionssql, $params2) = $DB->get_in_or_equal($postactions, SQL_PARAMS_NAMED, 'post');
 
     $guest           = (int)$CFG->siteguest;
     $guestrole       = (int)$CFG->guestroleid;
@@ -187,59 +189,56 @@ function stats_cron_daily($maxdays=1) {
         $logspresent = $DB->get_records_sql($sql, null, 0, 1);
 
         if ($logspresent) {
-            mtrace('Creating temporary table...');
             // drop first, this will fail sometimes
             try {
                 $DB->execute('DROP TABLE {log_temp}');
             }
             catch (dml_exception $e) {}
-            $sql = "CREATE TEMPORARY TABLE {log_temp} AS (SELECT course, userid, action FROM {log} l WHERE $timesql)";
+            $sql = "CREATE TABLE {log_temp} AS (
+                    SELECT course, userid, action, COUNT('x') AS sum
+                    FROM {log} l WHERE $timesql AND course <> 0
+                    GROUP BY course, userid, action)";
             $status = $DB->execute($sql);
-            $status = $status && $DB->execute('CREATE INDEX logtmp_userid ON {log_temp} (userid)');
+            $status = $status && $DB->execute('CREATE INDEX logtmp_userid ON {log_temp} (userid, course)');
             $status = $status && $DB->execute('CREATE INDEX logtmp_couusr ON {log_temp} (course, userid)');
-            $status = $status && $DB->execute('CREATE INDEX logtmp_action ON {log_temp} (action)');
-            $status = $status && $DB->execute('ANALYZE {log_temp}');
+            $status = $status && $DB->execute('CREATE INDEX logtmp_action ON {log_temp} (action, course, userid)');
             if (!$status) {
                 $failed = true;
                 break;
             }
-            mtrace('Successfully built temp table');
         }
+
+        stats_daily_progress('1');
 
     /// process login info first
         $sql = "INSERT INTO {stats_user_daily} (stattype, timeend, courseid, userid, statsreads)
 
-                SELECT 'logins', timeend, courseid, userid, count(statsreads)
-                 FROM (
-                          SELECT $nextmidnight AS timeend, ".SITEID." AS courseid, l.userid, 1 AS statsreads
-                            FROM {log_temp} l
-                           WHERE action = 'login'
-                       ) inline_view
-              GROUP BY timeend, courseid, userid
-                HAVING count(statsreads) > 0";
-
-        if ($logspresent and !$DB->execute($sql)) {
-            $failed = true;
-            break;
-        }
-        stats_daily_progress('1');
-
-        $sql = "INSERT INTO {stats_daily} (stattype, timeend, courseid, roleid, stat1, stat2)
-
-                SELECT 'logins' AS stattype, $nextmidnight AS timeend, ".SITEID." as courseid, 0,
-                       COALESCE((SELECT SUM(statsreads)
-                                       FROM {stats_user_daily} s1
-                                      WHERE s1.stattype = 'logins' AND timeend = $nextmidnight), 0) AS stat1,
-                       (SELECT COUNT('x')
-                          FROM {stats_user_daily} s2
-                         WHERE s2.stattype = 'logins' AND timeend = $nextmidnight) AS stat2" .
-                $DB->sql_null_from_clause();
+                SELECT 'logins' AS stattype, $nextmidnight AS timeend, ".SITEID." AS courseid, userid, SUM(sum) AS statsreads
+                FROM {log_temp}
+                WHERE action = 'login'
+                GROUP BY courseid, userid
+                HAVING (SUM(sum) > 0)";
 
         if ($logspresent and !$DB->execute($sql)) {
             $failed = true;
             break;
         }
         stats_daily_progress('2');
+
+        $sql = "INSERT INTO {stats_daily} (stattype, timeend, courseid, roleid, stat1, stat2)
+
+                SELECT 'logins' AS stattype, $nextmidnight AS timeend, ".SITEID." AS courseid, 0 AS roleid,
+                    COALESCE(SUM(sum), 0) AS stat1,
+                    COUNT(DISTINCT userid) AS stat2
+                FROM {log_temp}
+                WHERE action = 'login'
+                GROUP BY courseid";
+
+        if ($logspresent and !$DB->execute($sql)) {
+            $failed = true;
+            break;
+        }
+        stats_daily_progress('3');
 
 
         // Enrolments and active enrolled users
@@ -252,60 +251,37 @@ function stats_cron_daily($maxdays=1) {
         //   in that case, we'll count non-deleted users.
         //
 
+    /// enrolments for each course+role except frontpage
         $sql = "INSERT INTO {stats_daily} (stattype, timeend, courseid, roleid, stat1, stat2)
 
-                SELECT 'enrolments', timeend, courseid, roleid, COUNT(DISTINCT userid), 0
-                  FROM (
-                           SELECT $nextmidnight AS timeend, e.courseid, ra.roleid, ue.userid
-                             FROM {role_assignments} ra
-                             JOIN {context} c ON (c.id = ra.contextid AND c.contextlevel = :courselevel)
-                             JOIN {enrol} e ON e.courseid = c.instanceid
-                             JOIN {user_enrolments} ue ON (ue.enrolid = e.id AND ue.userid = ra.userid)
-                        ) inline_view
-              GROUP BY timeend, courseid, roleid";
+                SELECT 'enrolments' AS stattype, $nextmidnight AS timeend, e.courseid, ra.roleid,
+                    COUNT(DISTINCT ra.userid) AS stat1,
+                    COUNT(DISTINCT l.userid) AS stat2
+                FROM {role_assignments} ra
+                JOIN {context} ctx ON ctx.id = ra.contextid AND ctx.contextlevel = ".CONTEXT_COURSE."
+                JOIN {enrol} e ON e.courseid = ctx.instanceid
+                JOIN {user_enrolments} ue ON ue.enrolid = e.id AND ue.userid = ra.userid
+                LEFT JOIN {log_temp} l ON l.course = e.courseid AND l.userid = ra.userid
+                GROUP BY e.courseid, ra.roleid";
 
-        if (!$DB->execute($sql, array('courselevel'=>CONTEXT_COURSE))) {
-            $failed = true;
-            break;
-        }
-        stats_daily_progress('3');
-
-        // using table alias in UPDATE does not work in pg < 8.2
-        $sql = "UPDATE {stats_daily}
-                   SET stat2 = (SELECT COUNT(DISTINCT ra.userid)
-                                  FROM {role_assignments} ra
-                                  JOIN {context} c ON (c.id = ra.contextid AND c.contextlevel = :courselevel)
-                                  JOIN {enrol} e ON e.courseid = c.instanceid
-                                  JOIN {user_enrolments} ue ON (ue.enrolid = e.id AND ue.userid = ra.userid)
-                                  WHERE ra.roleid = {stats_daily}.roleid AND
-                                       e.courseid = {stats_daily}.courseid AND
-                                       EXISTS (SELECT 'x'
-                                                 FROM {log_temp} l
-                                                WHERE l.course = {stats_daily}.courseid AND
-                                                      l.userid = ra.userid))
-                 WHERE {stats_daily}.stattype = 'enrolments' AND
-                       {stats_daily}.timeend = $nextmidnight AND
-                       {stats_daily}.courseid IN
-                          (SELECT DISTINCT l.course
-                             FROM {log_temp} l)";
-
-        if (!$DB->execute($sql, array('courselevel'=>CONTEXT_COURSE))) {
+        if (!$DB->execute($sql)) {
             $failed = true;
             break;
         }
         stats_daily_progress('4');
 
     /// now get course total enrolments (roleid==0) - except frontpage
-        $sql = "INSERT INTO {stats_daily} (stattype, timeend, courseid, roleid, stat1, stat2)
+        $sql = "INSERT INTO {stats_daily} (stattype, timeend, courseid, stat1, stat2)
 
-                SELECT 'enrolments', timeend, id, nroleid, COUNT(DISTINCT userid), 0
-                  FROM (
-                           SELECT $nextmidnight AS timeend, e.courseid AS id, 0 AS nroleid, ue.userid
-                             FROM {enrol} e
-                             JOIN {user_enrolments} ue ON ue.enrolid = e.id
-                       ) inline_view
-              GROUP BY timeend, id, nroleid
-                HAVING COUNT(DISTINCT userid) > 0";
+                SELECT 'enrolments' AS stattype, $nextmidnight AS timeend, e.courseid,
+                    COUNT(DISTINCT ue.userid) AS stat1,
+                    COUNT(DISTINCT l.userid) AS stat2
+                FROM {enrol} e
+                JOIN {user_enrolments} ue ON ue.enrolid = e.id
+                LEFT JOIN {log_temp} l ON l.course = e.courseid AND l.userid = ue.userid
+                WHERE e.courseid <> ".SITEID."
+                GROUP BY e.courseid
+                HAVING COUNT(DISTINCT ue.userid) > 0";
 
         if ($logspresent and !$DB->execute($sql)) {
             $failed = true;
@@ -313,108 +289,101 @@ function stats_cron_daily($maxdays=1) {
         }
         stats_daily_progress('5');
 
-        $sql = "UPDATE {stats_daily}
-                   SET stat2 = (SELECT COUNT(DISTINCT ue.userid)
-                                  FROM {enrol} e
-                                  JOIN {user_enrolments} ue ON ue.enrolid = e.id
-                                 WHERE e.courseid = {stats_daily}.courseid AND
-                                       EXISTS (SELECT 'x'
-                                                 FROM {log_temp} l
-                                                WHERE l.course = {stats_daily}.courseid AND
-                                                      l.userid = ue.userid))
-                 WHERE {stats_daily}.stattype = 'enrolments' AND
-                       {stats_daily}.timeend = $nextmidnight AND
-                       {stats_daily}.roleid = 0 AND
-                       {stats_daily}.courseid IN
-                          (SELECT l.course
-                             FROM {log_temp} l
-                            WHERE l.course <> ".SITEID.")";
+        /// frontapge(==site) enrolments total
+        /// Default frontpage role enrolments are all site users (not deleted)
 
-        if ($logspresent and !$DB->execute($sql, array())) {
-            $failed = true;
-            break;
-        }
-        stats_daily_progress('6');
-
-    /// frontapge(==site) enrolments total
         $sql = "INSERT INTO {stats_daily} (stattype, timeend, courseid, roleid, stat1, stat2)
 
-                SELECT 'enrolments', $nextmidnight, ".SITEID.", 0,
-                       (SELECT COUNT('x')
-                          FROM {user} u
-                         WHERE u.deleted = 0) AS stat1,
-                       (SELECT COUNT(DISTINCT u.id)
-                          FROM {user} u
-                               JOIN {log_temp} l ON l.userid = u.id
-                         WHERE u.deleted = 0) AS stat2" .
-                $DB->sql_null_from_clause();
+                SELECT 'enrolments' AS stattype, $nextmidnight AS timeend, ".SITEID." AS courseid, 0 AS roleid,
+                    COUNT(DISTINCT u.id) AS stat1,
+                    COUNT(DISTINCT l.userid) AS stat2
+                FROM {user} u
+                LEFT JOIN {log_temp} l ON l.userid = u.id
+                WHERE u.deleted = 0";
 
         if ($logspresent and !$DB->execute($sql)) {
             $failed = true;
             break;
         }
-        stats_daily_progress('7');
 
-    /// Default frontpage role enrolments are all site users (not deleted)
+        stats_daily_progress('6');
+
         if ($defaultfproleid) {
-            // first remove default frontpage role counts if created by previous query
-            $sql = "DELETE
-                      FROM {stats_daily}
-                     WHERE stattype = 'enrolments' AND courseid = ".SITEID." AND
-                           roleid = $defaultfproleid AND timeend = $nextmidnight";
-            if ($logspresent and !$DB->execute($sql)) {
-                $failed = true;
-                break;
-            }
-            stats_daily_progress('8');
-
             $sql = "INSERT INTO {stats_daily} (stattype, timeend, courseid, roleid, stat1, stat2)
 
-                    SELECT 'enrolments', $nextmidnight, ".SITEID.", $defaultfproleid,
-                           (SELECT COUNT('x')
-                              FROM {user} u
-                             WHERE u.deleted = 0) AS stat1,
-                           (SELECT COUNT(DISTINCT u.id)
-                              FROM {user} u
-                                   JOIN {log_temp} l ON l.userid = u.id
-                             WHERE u.deleted = 0) AS stat2" .
-                    $DB->sql_null_from_clause();;
+                    SELECT 'enrolments' AS stattype, $nextmidnight AS timeend, ".SITEID." AS courseid, $defaultfproleid AS roleid,
+                        COUNT(DISTINCT u.id) AS stat1,
+                        COUNT(DISTINCT l.userid) AS stat2
+                    FROM {user} u
+                    LEFT JOIN {log_temp} l ON l.userid = u.id
+                    WHERE u.deleted = 0";
 
             if ($logspresent and !$DB->execute($sql)) {
                 $failed = true;
                 break;
             }
-            stats_daily_progress('9');
-
-        } else {
-            stats_daily_progress('x');
-            stats_daily_progress('x');
         }
 
+        stats_daily_progress('7');
 
 
-    /// individual user stats (including not-logged-in) in each course, this is slow - reuse this data if possible
-        list($viewactionssql, $params1) = $DB->get_in_or_equal($viewactions, SQL_PARAMS_NAMED, 'view');
-        list($postactionssql, $params2) = $DB->get_in_or_equal($postactions, SQL_PARAMS_NAMED, 'post');
+    /// individual user stats (including not-logged-in) in each course
         $sql = "INSERT INTO {stats_user_daily} (stattype, timeend, courseid, userid, statsreads, statswrites)
 
-                SELECT 'activity' AS stattype, $nextmidnight AS timeend, d.courseid, d.userid,
-                       (SELECT COUNT('x')
-                          FROM {log_temp} l
-                         WHERE l.userid = d.userid AND
-                               l.course = d.courseid AND
-                               l.action $viewactionssql) AS statsreads,
-                       (SELECT COUNT('x')
-                          FROM {log_temp} l
-                         WHERE l.userid = d.userid AND
-                               l.course = d.courseid AND
-                               l.action $postactionssql) AS statswrites
-                  FROM (SELECT DISTINCT u.id AS userid, l.course AS courseid
-                          FROM {user} u, {log_temp} l
-                         WHERE u.id = l.userid
-                       UNION
-                        SELECT 0 AS userid, ".SITEID." AS courseid" . $DB->sql_null_from_clause() . ") d";
-                        // can not use group by here because pg can not handle it :-(
+                SELECT 'activity' AS stattype, $nextmidnight AS timeend, l.course, l.userid,
+                    SUM(CASE WHEN l.action $viewactionssql THEN sum ELSE 0 END) AS statsreads,
+                    SUM(CASE WHEN l.action $postactionssql THEN sum ELSE 0 END) AS statswrites
+                FROM {log_temp} l
+                GROUP BY l.course, l.userid
+                UNION
+                SELECT 'activity' AS stattype, $nextmidnight AS timeend, ".SITEID." AS course,
+                    0 AS userid, 0 AS statsreads, 0 AS statswrites".$DB->sql_null_from_clause();
+
+        if ($logspresent and !$DB->execute($sql, array_merge($params1, $params2))) {
+            $failed = true;
+            break;
+        }
+        stats_daily_progress('8');
+
+
+    /// how many view/post actions in each course total
+        $sql = "INSERT INTO {stats_daily} (stattype, timeend, courseid, stat1, stat2)
+
+                SELECT 'activity' AS stattype, $nextmidnight AS timeend, course AS courseid,
+                    SUM(CASE WHEN action $viewactionssql THEN sum ELSE 0 END) AS stat1,
+                    SUM(CASE WHEN action $postactionssql THEN sum ELSE 0 END) AS stat2
+                FROM {log_temp}
+                GROUP BY course";
+
+        if ($logspresent and !$DB->execute($sql, array_merge($params1, $params2))) {
+            $failed = true;
+            break;
+        }
+        stats_daily_progress('9');
+
+
+    /// how many view actions for each course+role - excluding guests and frontpage
+
+        $sql = "INSERT INTO {stats_daily} (stattype, timeend, courseid, roleid, stat1, stat2)
+
+                SELECT 'activity' AS stattype, $nextmidnight AS timeend, x2.*
+                FROM (
+                    SELECT l.course, x1.roleid,
+                        SUM(CASE WHEN l.action $viewactionssql THEN l.sum ELSE 0 END) AS stat1,
+                        SUM(CASE WHEN l.action $postactionssql THEN l.sum ELSE 0 END) AS stat2
+                    FROM {log_temp} l
+                    JOIN (
+                        SELECT DISTINCT e.courseid AS course, ue.userid, ra.roleid
+                        FROM {enrol} e
+                        JOIN {user_enrolments} ue ON ue.enrolid = e.id
+                        JOIN {context} ctx ON ctx.instanceid = e.courseid AND ctx.contextlevel = ".CONTEXT_COURSE."
+                        JOIN {role_assignments} ra ON ra.contextid = ctx.id AND ra.userid = ue.userid
+                        WHERE ue.userid <> $guest AND ra.roleid <> $guestrole AND ctx.id <> {$fpcontext->id} AND ctx.instanceid <> ".SITEID."
+                    ) x1 ON x1.course = l.course AND x1.userid = l.userid
+                    WHERE l.course <> ".SITEID."
+                    GROUP BY l.course, x1.roleid
+                ) x2
+                WHERE stat1 > 0 OR stat2 > 0";
 
         if ($logspresent and !$DB->execute($sql, array_merge($params1, $params2))) {
             $failed = true;
@@ -422,19 +391,26 @@ function stats_cron_daily($maxdays=1) {
         }
         stats_daily_progress('10');
 
+    /// how many view actions from guests only in each course - excluding frontpage
+    /// normal users may enter course with temporary guest access too
 
-    /// how many view/post actions in each course total
         $sql = "INSERT INTO {stats_daily} (stattype, timeend, courseid, roleid, stat1, stat2)
 
-                SELECT 'activity' AS stattype, $nextmidnight AS timeend, c.id AS courseid, 0,
-                       (SELECT COUNT('x')
-                          FROM {log_temp} l1
-                         WHERE l1.course = c.id AND l1.action $viewactionssql) AS stat1,
-                       (SELECT COUNT('x')
-                          FROM {log_temp} l2
-                         WHERE l2.course = c.id AND l2.action $postactionssql) AS stat2
-                  FROM {course} c
-                 WHERE EXISTS (SELECT 'x' FROM {log_temp} l WHERE l.course = c.id)";
+                SELECT 'activity' AS stattype, $nextmidnight AS timeend, course, $guestrole AS roleid, stat1, stat2
+                FROM (
+                    SELECT l.course,
+                        SUM(CASE WHEN l.action $viewactionssql THEN l.sum ELSE 0 END) AS stat1,
+                        SUM(CASE WHEN l.action $postactionssql THEN l.sum ELSE 0 END) AS stat2
+                    FROM {log_temp} l
+                    LEFT JOIN (
+                        SELECT DISTINCT e.courseid, ue.userid
+                        FROM {enrol} e
+                        JOIN {user_enrolments} ue ON ue.enrolid = e.id
+                    ) cue ON cue.courseid = l.course AND cue.userid = l.userid
+                    WHERE l.course <> ".SITEID." AND (l.userid = $guest OR cue.userid IS NULL)
+                    GROUP BY l.course
+                ) AS x
+                WHERE stat1 > 0 OR stat2 > 0";
 
         if ($logspresent and !$DB->execute($sql, array_merge($params1, $params2))) {
             $failed = true;
@@ -443,139 +419,75 @@ function stats_cron_daily($maxdays=1) {
         stats_daily_progress('11');
 
 
-    /// how many view actions for each course+role - excluding guests and frontpage
-
+    /// how many view actions for each role on frontpage - excluding guests, not-logged-in and default frontpage role
         $sql = "INSERT INTO {stats_daily} (stattype, timeend, courseid, roleid, stat1, stat2)
 
-                SELECT 'activity', timeend, courseid, roleid, SUM(statsreads), SUM(statswrites)
-                  FROM (
-                           SELECT $nextmidnight AS timeend, pl.courseid, pl.roleid, sud.statsreads, sud.statswrites
-                             FROM {stats_user_daily} sud,
-                                      (SELECT DISTINCT ra.userid, ra.roleid, e.courseid
-                                         FROM {role_assignments} ra
-                                         JOIN {context} c ON (c.id = ra.contextid AND c.contextlevel = :courselevel)
-                                         JOIN {enrol} e ON e.courseid = c.instanceid
-                                         JOIN {user_enrolments} ue ON (ue.enrolid = e.id AND ue.userid = ra.userid)
-                                        WHERE ra.roleid <> $guestrole AND
-                                              ra.userid <> $guest
-                                      ) pl
-                            WHERE sud.userid = pl.userid AND
-                                  sud.courseid = pl.courseid AND
-                                  sud.timeend = $nextmidnight AND
-                                  sud.stattype='activity'
-                       ) inline_view
-              GROUP BY timeend, courseid, roleid
-                HAVING SUM(statsreads) > 0 OR SUM(statswrites) > 0";
+                SELECT 'activity', $nextmidnight AS timeend, x.*
+                FROM (
+                    SELECT l.course AS courseid, ra.roleid,
+                        SUM(CASE WHEN l.action $viewactionssql THEN l.sum ELSE 0 END) AS stat1,
+                        SUM(CASE WHEN l.action $postactionssql THEN l.sum ELSE 0 END) AS stat2
+                    FROM {log_temp} l
+                    JOIN {role_assignments} ra ON ra.userid = l.userid
+                    JOIN {context} ctx ON ctx.id = ra.contextid
+                    WHERE l.course = ".SITEID." AND l.userid <> $guest
+                        AND ctx.contextlevel = ".CONTEXT_COURSE." AND ctx.instanceid = l.course
+                        AND ra.roleid <> $defaultfproleid AND ra.roleid <> $guestrole AND ra.contextid = {$fpcontext->id}
+                    GROUP BY l.course, ra.roleid
+                ) x
+                WHERE stat1 > 0 OR stat2 > 0";
 
-        if ($logspresent and !$DB->execute($sql, array('courselevel'=>CONTEXT_COURSE))) {
+        if ($logspresent and !$DB->execute($sql, array_merge($params1, $params2))) {
             $failed = true;
             break;
         }
         stats_daily_progress('12');
 
-    /// how many view actions from guests only in each course - excluding frontpage
-    /// normal users may enter course with temporary guest access too
 
+    /// how many view actions for default frontpage role on frontpage only
         $sql = "INSERT INTO {stats_daily} (stattype, timeend, courseid, roleid, stat1, stat2)
 
-                SELECT 'activity', timeend, courseid, nroleid, SUM(statsreads), SUM(statswrites)
-                  FROM (
-                           SELECT $nextmidnight AS timeend, sud.courseid, $guestrole AS nroleid, sud.statsreads, sud.statswrites
-                             FROM {stats_user_daily} sud
-                            WHERE sud.timeend = $nextmidnight AND sud.courseid <> ".SITEID." AND
-                                  sud.stattype='activity' AND
-                                  (sud.userid = $guest OR sud.userid
-                                    NOT IN (SELECT ue.userid
-                                              FROM {user_enrolments} ue
-                                              JOIN {enrol} e ON ue.enrolid = e.id
-                                             WHERE e.courseid = sud.courseid))
-                       ) inline_view
-              GROUP BY timeend, courseid, nroleid
-                HAVING SUM(statsreads) > 0 OR SUM(statswrites) > 0";
+                SELECT 'activity', $nextmidnight AS timeend, ".SITEID." AS courseid, $defaultfproleid AS roleid, x.*
+                FROM (
+                    SELECT
+                        SUM(CASE WHEN l.action $viewactionssql THEN l.sum ELSE 0 END) AS stat1,
+                        SUM(CASE WHEN l.action $postactionssql THEN l.sum ELSE 0 END) AS stat2
+                    FROM {log_temp} l
+                    LEFT JOIN (
+                        SELECT DISTINCT userid
+                        FROM {role_assignments}
+                        WHERE roleid <> $guestrole AND roleid <> $defaultfproleid AND contextid = {$fpcontext->id}
+                    ) ra ON ra.userid = l.userid
+                    WHERE l.course = ".SITEID." AND l.userid <> $guest AND l.userid <> 0 AND ra.userid IS NULL
+                    GROUP BY l.course
+                ) x
+                WHERE stat1 > 0 AND stat2 > 0";
 
-        if ($logspresent and !$DB->execute($sql, array())) {
+        if ($logspresent and !$DB->execute($sql, array_merge($params1, $params2))) {
             $failed = true;
             break;
         }
         stats_daily_progress('13');
 
-
-    /// how many view actions for each role on frontpage - excluding guests, not-logged-in and default frontpage role
+    /// how many view actions for guests or not-logged-in on frontpage
         $sql = "INSERT INTO {stats_daily} (stattype, timeend, courseid, roleid, stat1, stat2)
 
-                SELECT 'activity', timeend, courseid, roleid, SUM(statsreads), SUM(statswrites)
-                  FROM (
-                           SELECT $nextmidnight AS timeend, pl.courseid, pl.roleid, sud.statsreads, sud.statswrites
-                             FROM {stats_user_daily} sud,
-                                      (SELECT DISTINCT ra.userid, ra.roleid, c.instanceid AS courseid
-                                         FROM {role_assignments} ra
-                                         JOIN {context} c ON c.id = ra.contextid
-                                        WHERE ra.contextid = :fpcontext AND
-                                              ra.roleid <> $defaultfproleid AND
-                                              ra.roleid <> $guestrole AND
-                                              ra.userid <> $guest
-                                      ) pl
-                            WHERE sud.userid = pl.userid AND
-                                  sud.courseid = pl.courseid AND
-                                  sud.timeend = $nextmidnight AND
-                                  sud.stattype='activity'
-                       ) inline_view
-              GROUP BY timeend, courseid, roleid
-                HAVING SUM(statsreads) > 0 OR SUM(statswrites) > 0";
+                SELECT 'activity', $nextmidnight AS timeend, ".SITEID." AS courseid, $guestrole AS roleid, x.*
+                FROM (
+                    SELECT
+                        SUM(CASE WHEN l.action $viewactionssql THEN l.sum ELSE 0 END) AS stat1,
+                        SUM(CASE WHEN l.action $postactionssql THEN l.sum ELSE 0 END) AS stat2
+                    FROM {log_temp} l
+                    WHERE l.course = ".SITEID." AND (l.userid = $guest OR l.userid = 0)
+                    GROUP BY l.course
+                ) x
+                WHERE stat1 > 0 AND stat2 > 0";
 
-        if ($logspresent and !$DB->execute($sql, array('fpcontext'=>$fpcontext->id))) {
+        if ($logspresent and !$DB->execute($sql, array_merge($params1, $params2))) {
             $failed = true;
             break;
         }
         stats_daily_progress('14');
-
-
-    /// how many view actions for default frontpage role on frontpage only
-        $sql = "INSERT INTO {stats_daily} (stattype, timeend, courseid, roleid, stat1, stat2)
-
-                SELECT 'activity', timeend, courseid, nroleid, SUM(statsreads), SUM(statswrites)
-                  FROM (
-                           SELECT sud.timeend AS timeend, sud.courseid, $defaultfproleid AS nroleid, sud.statsreads, sud.statswrites
-                             FROM {stats_user_daily} sud
-                            WHERE sud.timeend = :nextm AND sud.courseid = :siteid AND
-                                  sud.stattype='activity' AND
-                                  sud.userid <> $guest AND sud.userid <> 0 AND sud.userid
-                                  NOT IN (SELECT ra.userid
-                                            FROM {role_assignments} ra
-                                           WHERE ra.roleid <> $guestrole AND
-                                                 ra.roleid <> $defaultfproleid AND ra.contextid = :fpcontext)
-                       ) inline_view
-              GROUP BY timeend, courseid, nroleid
-                HAVING SUM(statsreads) > 0 OR SUM(statswrites) > 0";
-
-        if ($logspresent and !$DB->execute($sql, array('fpcontext'=>$fpcontext->id, 'siteid'=>SITEID, 'nextm'=>$nextmidnight))) {
-            $failed = true;
-            break;
-        }
-        stats_daily_progress('15');
-
-    /// how many view actions for guests or not-logged-in on frontpage
-        $sql = "INSERT INTO {stats_daily} (stattype, timeend, courseid, roleid, stat1, stat2)
-
-                SELECT 'activity', timeend, courseid, nroleid, SUM(statsreads), SUM(statswrites)
-                  FROM (
-                           SELECT $nextmidnight AS timeend, ".SITEID." AS courseid, $guestrole AS nroleid, pl.statsreads, pl.statswrites
-                             FROM (
-                                      SELECT sud.statsreads, sud.statswrites
-                                        FROM {stats_user_daily} sud
-                                       WHERE (sud.userid = $guest OR sud.userid = 0) AND
-                                             sud.timeend = $nextmidnight AND sud.courseid = ".SITEID." AND
-                                             sud.stattype='activity'
-                                  ) pl
-                       ) inline_view
-              GROUP BY timeend, courseid, nroleid
-                HAVING SUM(statsreads) > 0 OR SUM(statswrites) > 0";
-
-        if ($logspresent and !$DB->execute($sql)) {
-            $failed = true;
-            break;
-        }
-        stats_daily_progress('16');
 
         // remember processed days
         set_config('statslastdaily', $nextmidnight);
