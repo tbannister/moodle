@@ -165,6 +165,7 @@ function stats_cron_daily($maxdays=1) {
         if ($days >= $maxdays) {
             mtrace("...stopping early, reached maximum number of $maxdays days - will continue next time.");
             set_cron_lock('statsrunning', null);
+            stats_drop_log_temp();
             return false;
         }
 
