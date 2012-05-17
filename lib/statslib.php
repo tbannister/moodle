@@ -246,7 +246,7 @@ function stats_cron_daily($maxdays=1) {
                 LEFT JOIN {log_temp} l ON l.course = e.courseid AND l.userid = ra.userid
                 GROUP BY e.courseid, ra.roleid";
 
-        if (!$DB->execute($sql)) {
+        if ($logspresent and !$DB->execute($sql)) {
             $failed = true;
             break;
         }
