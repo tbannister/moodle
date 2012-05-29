@@ -213,8 +213,7 @@ function stats_cron_daily($maxdays=1) {
                     COALESCE(SUM(sum), 0) AS stat1,
                     COUNT(DISTINCT userid) AS stat2
                 FROM {log_temp}
-                WHERE action = 'login'
-                GROUP BY courseid";
+                WHERE action = 'login'";
 
         if ($logspresent and !$DB->execute($sql)) {
             $failed = true;
@@ -253,9 +252,9 @@ function stats_cron_daily($maxdays=1) {
         stats_daily_progress('4');
 
     /// now get course total enrolments (roleid==0) - except frontpage
-        $sql = "INSERT INTO {stats_daily} (stattype, timeend, courseid, stat1, stat2)
+        $sql = "INSERT INTO {stats_daily} (stattype, timeend, courseid, roleid, stat1, stat2)
 
-                SELECT 'enrolments' AS stattype, $nextmidnight AS timeend, e.courseid,
+                SELECT 'enrolments' AS stattype, $nextmidnight AS timeend, e.courseid, 0 AS roleid,
                     COUNT(DISTINCT ue.userid) AS stat1,
                     COUNT(DISTINCT l.userid) AS stat2
                 FROM {enrol} e
@@ -274,7 +273,8 @@ function stats_cron_daily($maxdays=1) {
     /// frontapge(==site) enrolments total
         $sql = "INSERT INTO {stats_daily} (stattype, timeend, courseid, roleid, stat1, stat2)
 
-                SELECT 'enrolments' AS stattype, $nextmidnight AS timeend, ".SITEID." AS courseid, 0 AS roleid,
+                SELECT 'enrolments' AS stattype, $nextmidnight AS timeend, ".SITEID." AS courseid,
+                    0 AS roleid,
                     COUNT(DISTINCT u.id) AS stat1,
                     COUNT(DISTINCT l.userid) AS stat2
                 FROM {user} u
@@ -291,7 +291,8 @@ function stats_cron_daily($maxdays=1) {
         if ($defaultfproleid) {
             $sql = "INSERT INTO {stats_daily} (stattype, timeend, courseid, roleid, stat1, stat2)
 
-                    SELECT 'enrolments' AS stattype, $nextmidnight AS timeend, ".SITEID." AS courseid, $defaultfproleid AS roleid,
+                    SELECT 'enrolments' AS stattype, $nextmidnight AS timeend,
+                        ".SITEID." AS courseid,$defaultfproleid AS roleid,
                         COUNT(DISTINCT u.id) AS stat1,
                         COUNT(DISTINCT l.userid) AS stat2
                     FROM {user} u
@@ -312,10 +313,8 @@ function stats_cron_daily($maxdays=1) {
                     SUM(CASE WHEN l.action $viewactionssql THEN sum ELSE 0 END) AS statsreads,
                     SUM(CASE WHEN l.action $postactionssql THEN sum ELSE 0 END) AS statswrites
                 FROM {log_temp} l
-                GROUP BY l.course, l.userid
-                UNION
-                SELECT 'activity' AS stattype, $nextmidnight AS timeend, ".SITEID." AS course,
-                    0 AS userid, 0 AS statsreads, 0 AS statswrites".$DB->sql_null_from_clause();
+                WHERE !(course = 0 AND userid = 0)
+                GROUP BY l.course, l.userid";
 
         if ($logspresent and !$DB->execute($sql, array_merge($params1, $params2))) {
             $failed = true;
@@ -330,6 +329,7 @@ function stats_cron_daily($maxdays=1) {
                     SUM(CASE WHEN action $viewactionssql THEN sum ELSE 0 END) AS stat1,
                     SUM(CASE WHEN action $postactionssql THEN sum ELSE 0 END) AS stat2
                 FROM {log_temp}
+                WHERE course != 0
                 GROUP BY course";
 
         if ($logspresent and !$DB->execute($sql, array_merge($params1, $params2))) {
@@ -353,7 +353,8 @@ function stats_cron_daily($maxdays=1) {
                         JOIN {user_enrolments} ue ON ue.enrolid = e.id
                         JOIN {context} ctx ON ctx.instanceid = e.courseid AND ctx.contextlevel = ".CONTEXT_COURSE."
                         JOIN {role_assignments} ra ON ra.contextid = ctx.id AND ra.userid = ue.userid
-                        WHERE ue.userid <> $guest AND ra.roleid <> $guestrole AND ctx.id <> {$fpcontext->id} AND ctx.instanceid <> ".SITEID."
+                        WHERE ue.userid <> $guest AND ra.roleid <> $guestrole
+                          AND ctx.id <> {$fpcontext->id} AND ctx.instanceid <> ".SITEID."
                     ) x1 ON x1.course = l.course AND x1.userid = l.userid
                     WHERE l.course <> ".SITEID."
                     GROUP BY l.course, x1.roleid
@@ -370,7 +371,8 @@ function stats_cron_daily($maxdays=1) {
     /// normal users may enter course with temporary guest access too
         $sql = "INSERT INTO {stats_daily} (stattype, timeend, courseid, roleid, stat1, stat2)
 
-                SELECT 'activity' AS stattype, $nextmidnight AS timeend, course, $guestrole AS roleid, stat1, stat2
+                SELECT 'activity' AS stattype, $nextmidnight AS timeend, course,
+                    $guestrole AS roleid, stat1, stat2
                 FROM (
                     SELECT l.course,
                         SUM(CASE WHEN l.action $viewactionssql THEN l.sum ELSE 0 END) AS stat1,
@@ -405,7 +407,8 @@ function stats_cron_daily($maxdays=1) {
                     JOIN {context} ctx ON ctx.id = ra.contextid
                     WHERE l.course = ".SITEID." AND l.userid <> $guest
                         AND ctx.contextlevel = ".CONTEXT_COURSE." AND ctx.instanceid = l.course
-                        AND ra.roleid <> $defaultfproleid AND ra.roleid <> $guestrole AND ra.contextid = {$fpcontext->id}
+                        AND ra.roleid <> $defaultfproleid AND ra.roleid <> $guestrole
+                        AND ra.contextid = {$fpcontext->id}
                     GROUP BY l.course, ra.roleid
                 ) x
                 WHERE stat1 > 0 OR stat2 > 0";
@@ -1384,7 +1387,7 @@ function stats_create_log_temp($timestart, $timeend) {
     $sql = "INSERT INTO {log_temp}
 
             SELECT course, userid, action, COUNT('x') AS sum
-            FROM {log} WHERE time >= $timestart AND time < $timeend AND course <> 0
+            FROM {log} WHERE time >= $timestart AND time < $timeend
             GROUP BY course, userid, action";
 
     if (!$DB->execute($sql)) {
