@@ -1,4 +1,5 @@
 <?php
+    require_once($CFG->libdir .'/ddllib.php');
 
     // THESE CONSTANTS ARE USED FOR THE REPORTING PAGE.
 
