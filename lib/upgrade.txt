@@ -7,6 +7,8 @@ information provided here is intended especially for developers.
 * PHPUnit: PHPMailer Sink is now started for all tests and is setup within the phpunit wrapper for advanced tests.
   Catching debugging messages when sending mail will no longer work. Use $sink = $this->redirectEmails(); and then check
   the message in the sink instead.
+* Added optional $logextra parameter to restore_legacy method of \core\event\base class to
+  match restore and restore_unknown methods and provide similar functionality.
 
 === 2.8 ===
 

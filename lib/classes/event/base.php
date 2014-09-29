@@ -396,9 +396,10 @@ abstract class base implements \IteratorAggregate {
      * Create fake event from legacy log data.
      *
      * @param \stdClass $legacy
+     * @param array $logextra Additional properties of the log
      * @return base
      */
-    public static final function restore_legacy($legacy) {
+    public static final function restore_legacy($legacy, array $logextra = array()) {
         $classname = get_called_class();
         /** @var base $event */
         $event = new $classname();
@@ -463,7 +464,7 @@ abstract class base implements \IteratorAggregate {
         $event->data['relateduserid'] = ($legacy->userid ? $legacy->userid : null);
         $event->data['timecreated'] = $legacy->time;
 
-        $event->logextra = array();
+        $event->logextra = $logextra;
         if ($legacy->ip) {
             $event->logextra['origin'] = 'web';
             $event->logextra['ip'] = $legacy->ip;
