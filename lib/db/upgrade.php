@@ -3732,5 +3732,34 @@ function xmldb_main_upgrade($oldversion) {
         upgrade_main_savepoint(true, 2014051203.09);
     }
 
+    if ($oldversion < 2014051208.01) {
+        // MDL-47787 - Clean up orphaned question categories.
+        $sql = 'SELECT qc.id
+                  FROM {question_categories} qc
+             LEFT JOIN {context} c ON qc.contextid = c.id
+                 WHERE c.id IS NULL';
+        $categories = $DB->get_recordset_sql($sql);
+        $catcount = count($categories);
+
+        if ($catcount > 0) {
+            $pbar = new progress_bar('allowedmods', 500, true);
+
+            $i = 0;
+            foreach ($categories as $category) {
+                // One transaction per category.
+                $transaction = $DB->start_delegated_transaction();
+                $i += 1;
+                question_category_delete_safe($category);
+                $pbar->update($i, $catcount, "Removing orphaned question categories - $i/$catcount.");
+                $transaction->allow_commit();
+            }
+
+        }
+
+        $categories->close();
+
+        upgrade_main_savepoint(true, 2014051208.01);
+    }
+
     return true;
 }
