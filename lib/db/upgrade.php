@@ -3038,5 +3038,27 @@ function xmldb_main_upgrade($oldversion) {
         upgrade_main_savepoint(true, 2013111805.11);
     }
 
+    if ($oldversion < 2013111810.01) {
+        upgrade_set_timeout(60 * 20); // This may take a while.
+        // MDL-47787 - Clean up orphaned question categories.
+        $sql = 'SELECT qc.id
+                  FROM {question_categories} qc
+             LEFT JOIN {context} c ON qc.contextid = c.id
+                 WHERE c.id IS NULL';
+        $categories = $DB->get_recordset_sql($sql);
+        foreach ($categories as $category) {
+            $questions = $DB->get_recordset('question', array('category' => $ca
+            foreach ($questions as $question) {
+                question_delete_question($question->id);
+            }
+            $DB->delete_records('question_categories', array('id' => $category-
+            $questions->close();
+        }
+        $categories->close();
+
+        // Main savepoint reached.
+        upgrade_main_savepoint(true, 2013111810.01);
+    }
+
     return true;
 }

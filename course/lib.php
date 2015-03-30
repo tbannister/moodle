@@ -1652,6 +1652,7 @@ function course_delete_module($cmid) {
     global $CFG, $DB;
 
     require_once($CFG->libdir.'/gradelib.php');
+    require_once($CFG->libdir.'/questionlib.php');
     require_once($CFG->dirroot.'/blog/lib.php');
     require_once($CFG->dirroot.'/calendar/lib.php');
 
@@ -1684,6 +1685,9 @@ function course_delete_module($cmid) {
         throw new moodle_exception('cannotdeletemodulemissingfunc', '', '', null,
             "Cannot delete this module as the function {$modulename}_delete_instance is missing in mod/$modulename/lib.php.");
     }
+
+    // Delete activity context questions and question categories.
+    question_delete_activity($cm);
 
     // Call the delete_instance function, if it returns false throw an exception.
     if (!$deleteinstancefunction($cm->instance)) {

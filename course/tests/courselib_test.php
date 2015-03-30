@@ -582,7 +582,23 @@ class core_course_courselib_testcase extends advanced_testcase {
         return $moduleinfo;
    }
 
+    /**
+     * Data provider for course_delete module
+     *
+     * @return array An array of arrays contain test data
+     */
+    public function provider_course_delete_module() {
+        $data = array();
 
+        $data['assign'] = array('assign', array('duedate' => time()));
+        $data['quiz'] = array('quiz', array('duedate' => time()));
+
+        return $data;
+    }
+
+    /**
+     * Test the create_course function
+     */
     public function test_create_course() {
         global $DB;
         $this->resetAfterTest(true);
@@ -1388,27 +1404,53 @@ class core_course_courselib_testcase extends advanced_testcase {
         $this->assertEquals($pagecm->visible, 0);
     }
 
-    public function test_course_delete_module() {
+    /**
+     * Tests the function that deletes a course module
+     *
+     * @param string $type The type of module to create
+     * @param array $options The options to use to create the module
+     * @dataProvider provider_course_delete_module
+     */
+    public function test_course_delete_module($type, $options) {
         global $DB;
         $this->resetAfterTest(true);
         $this->setAdminUser();
 
         // Create course and modules.
         $course = $this->getDataGenerator()->create_course(array('numsections' => 5));
+        $options['course'] = $course->id;
 
         // Generate an assignment with due date (will generate a course event).
-        $assign = $this->getDataGenerator()->create_module('assign', array('duedate' => time(), 'course' => $course->id));
+        $module = $this->getDataGenerator()->create_module($type, $options);
 
-        $cm = get_coursemodule_from_instance('assign', $assign->id);
+        $cm = get_coursemodule_from_instance($type, $module->id);
 
         // Verify context exists.
-        $this->assertInstanceOf('context_module', context_module::instance($cm->id, IGNORE_MISSING));
+        $modcontext = context_module::instance($cm->id, IGNORE_MISSING);
+        $this->assertInstanceOf('context_module', $modcontext);
 
-        // Verify event assignment event has been generated.
-        $eventcount = $DB->count_records('event', array('instance' => $assign->id, 'modulename' => 'assign'));
-        $this->assertEquals(1, $eventcount);
+        // Make module specific messes.
+        switch ($type) {
+            case 'assign':
+                // Verify event assignment event has been generated.
+                $eventcount = $DB->count_records('event', array('instance' => $module->id, 'modulename' => $type));
+                $this->assertEquals(1, $eventcount);
+                break;
 
-        // Run delete..
+            case 'quiz':
+                $this->expectOutputRegex('/'.get_string('unusedcategorydeleted', 'quiz').'/');
+                $qgen = $this->getDataGenerator()->get_plugin_generator('core_question');
+                $qcat = $qgen->create_question_category(array('contextid' => $modcontext->id));
+                $questions = array(
+                    $qgen->create_question('shortanswer', null, array('category' => $qcat->id)),
+                    $qgen->create_question('shortanswer', null, array('category' => $qcat->id)),
+                );
+                break;
+            default:
+                break;
+        }
+
+        // Run delete.
         course_delete_module($cm->id);
 
         // Verify the context has been removed.
@@ -1418,9 +1460,25 @@ class core_course_courselib_testcase extends advanced_testcase {
         $cmcount = $DB->count_records('course_modules', array('id' => $cm->id));
         $this->assertEmpty($cmcount);
 
-        // Verify event assignment events have been removed.
-        $eventcount = $DB->count_records('event', array('instance' => $assign->id, 'modulename' => 'assign'));
-        $this->assertEmpty($eventcount);
+        // Test clean up of module specific messes.
+        switch ($type) {
+            case 'assign':
+                // Verify event assignment events have been removed.
+                $eventcount = $DB->count_records('event', array('instance' => $module->id, 'modulename' => $type));
+                $this->assertEmpty($eventcount);
+                break;
+            case 'quiz':
+                // Verify category deleted.
+                $criteria = array('contextid' => $modcontext->id);
+                $this->assertEquals(0, $DB->count_records('question_categories', $criteria));
+
+                // Verify questions deleted.
+                $criteria = array('category' => $qcat->id);
+                $this->assertEquals(0, $DB->count_records('question', $criteria));
+                break;
+            default:
+                break;
+        }
     }
 
     /**
