@@ -261,8 +261,8 @@ function match_grade_options($gradeoptionsfull, $grade, $matchgrades = 'error') 
 function question_category_delete_safe($category) {
     global $DB;
     $criteria = array('category' => $category->id);
-    $context = context::instance_by_id($category->contextid);
-    $rescueqcategory = null; // See the code around the call to question_save_from_deletion.
+    $context = context::instance_by_id($category->contextid, IGNORE_MISSING);
+    $rescue = null; // See the code around the call to question_save_from_deletion.
 
     // Deal with any questions in the category.
     if ($questions = $DB->get_records('question', $criteria, '', 'id,qtype')) {
@@ -280,17 +280,15 @@ function question_category_delete_safe($category) {
         $questionids = $DB->get_records_menu('question', $criteria, '', 'id, 1');
         if (!empty($questionids)) {
             $parentcontextid = false;
-            $parentcontext = $context->get_parent_context();
-            if ($parentcontext) {
-                $parentcontextid = $parentcontext->id;
+            $name = get_string('unknown', 'question');
+            if ($context !== false) {
+                $name = $context->get_context_name();
+                $parentcontext = $context->get_parent_context();
+                if ($parentcontext) {
+                    $parentcontextid = $parentcontext->id;
+                }
             }
-            if (!$rescueqcategory = question_save_from_deletion(
-                    array_keys($questionids), $parentcontextid,
-                    $context->get_context_name(), $rescueqcategory)) {
-                return false;
-            }
-            $feedbackdata[] = array($category->name,
-                get_string('questionsmovedto', 'question', $rescueqcategory->name));
+            question_save_from_deletion(array_keys($questionids), $parentcontextid, $name, $rescue);
         }
     }
 

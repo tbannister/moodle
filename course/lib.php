@@ -1639,7 +1639,7 @@ function set_coursemodule_visible($id, $visible) {
 }
 
 /**
- * This function will handles the whole deletion process of a module. This includes calling
+ * This function will handle the whole deletion process of a module. This includes calling
  * the modules delete_instance function, deleting files, events, grades, conditional data,
  * the data in the course_module and course_sections table and adding a module deletion
  * event to the DB.
