@@ -434,7 +434,7 @@ class navigation_node implements renderable {
     public function build_flat_navigation_list(flat_navigation $nodes, $showdivider = false) {
         if ($this->showinflatnavigation) {
             $indent = 0;
-            if ($this->type == self::TYPE_COURSE || $this->key == self::COURSE_INDEX_PAGE) {
+            if ((self::TYPE_COURSE == $this->type) || (self::COURSE_INDEX_PAGE === $this->key)) {
                 $indent = 1;
             }
             $flat = new flat_navigation_node($this, $indent);
