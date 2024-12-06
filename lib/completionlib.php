@@ -913,8 +913,11 @@ class completion_info {
     public function delete_all_state($cm) {
         global $DB;
 
+        $conditions = ['coursemoduleid' => $cm->id];
+
         // Delete from database
-        $DB->delete_records('course_modules_completion', array('coursemoduleid'=>$cm->id));
+        $DB->delete_records('course_modules_completion', $conditions);
+        $DB->delete_records('course_modules_viewed', $conditions);
 
         // Check if there is an associated course completion criteria
         $criteria = $this->get_criteria(COMPLETION_CRITERIA_TYPE_ACTIVITY);
