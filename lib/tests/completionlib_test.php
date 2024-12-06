@@ -670,9 +670,12 @@ class completionlib_test extends advanced_testcase {
 
         // Check it works ok without data in session.
         /** @var $DB PHPUnit_Framework_MockObject_MockObject */
-        $DB->expects($this->once())
+        $DB->expects($this->exactly(2))
             ->method('delete_records')
-            ->with('course_modules_completion', array('coursemoduleid' => 42))
+            ->withConsecutive(
+                ['course_modules_completion', ['coursemoduleid' => 42]],
+                ['course_modules_viewed', ['coursemoduleid' => 42]]
+            )
             ->will($this->returnValue(true));
         $c->delete_all_state($cm);
     }
@@ -961,7 +964,7 @@ class completionlib_test extends advanced_testcase {
         $completiondataafterreset = $completioninfo->get_completion_data($cm->id, $this->user->id, $defaultdata);
         $this->assertTrue(array_key_exists('viewed', $completiondataafterreset));
         $this->assertTrue(array_key_exists('coursemoduleid', $completiondataafterreset));
-        $this->assertEquals(1, $completiondataafterreset['viewed']);
+        $this->assertEquals(0, $completiondataafterreset['viewed']);
         $this->assertEquals($cm->id, $completiondatabeforeview['coursemoduleid']);
     }
 
