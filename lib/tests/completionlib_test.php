@@ -939,8 +939,10 @@ class completionlib_test extends advanced_testcase {
         $completiondatabeforeview = $completioninfo->get_completion_data($cm->id, $this->user->id, $defaultdata);
         $this->assertTrue(array_key_exists('viewed', $completiondatabeforeview));
         $this->assertTrue(array_key_exists('coursemoduleid', $completiondatabeforeview));
+        $this->assertTrue(array_key_exists('completionstate', $completiondatabeforeview));
         $this->assertEquals(0, $completiondatabeforeview['viewed']);
         $this->assertEquals($cm->id, $completiondatabeforeview['coursemoduleid']);
+        $this->assertNotNull($completiondatabeforeview['completionstate']);
 
         // Mark as completed before viewing it.
         $completioninfo->update_state($cm, COMPLETION_COMPLETE, $this->user->id, true);
@@ -953,16 +955,20 @@ class completionlib_test extends advanced_testcase {
         $completiondata = $completioninfo->get_completion_data($cm->id, $this->user->id, $defaultdata);
         $this->assertTrue(array_key_exists('viewed', $completiondata));
         $this->assertTrue(array_key_exists('coursemoduleid', $completiondata));
+        $this->assertTrue(array_key_exists('completionstate', $completiondata));
         $this->assertEquals(1, $completiondata['viewed']);
-        $this->assertEquals($cm->id, $completiondatabeforeview['coursemoduleid']);
+        $this->assertEquals($cm->id, $completiondata['coursemoduleid']);
+        $this->assertNotNull($completiondata['completionstate']);
 
         $completioninfo->reset_all_state($cm);
 
         $completiondataafterreset = $completioninfo->get_completion_data($cm->id, $this->user->id, $defaultdata);
         $this->assertTrue(array_key_exists('viewed', $completiondataafterreset));
         $this->assertTrue(array_key_exists('coursemoduleid', $completiondataafterreset));
+        $this->assertTrue(array_key_exists('completionstate', $completiondataafterreset));
         $this->assertEquals(1, $completiondataafterreset['viewed']);
-        $this->assertEquals($cm->id, $completiondatabeforeview['coursemoduleid']);
+        $this->assertEquals($cm->id, $completiondataafterreset['coursemoduleid']);
+        $this->assertNotNull($completiondataafterreset['completionstate']);
     }
 
     /**
