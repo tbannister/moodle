@@ -1630,6 +1630,14 @@ class completion_info {
             if (empty($data->coursemoduleid) && empty($data->userid)) {
                 $data->coursemoduleid = $data->cmvcoursemoduleid;
                 $data->userid = $data->cmvuserid;
+                $data->completionstate = COMPLETION_INCOMPLETE;
+                if (array_key_exists('completionstate', $defaultdata)) {
+                    $data->completionstate = $defaultdata['completionstate'];
+                }
+                $data->timemodified = 0;
+                if (array_key_exists('timemodified', $defaultdata)) {
+                    $data->completionstate = $defaultdata['timemodified'];
+                }
             }
             // When reseting all state in the completion, we need to keep current view state.
             // We cannot assume the activity has been viewed, so we should check if there is any course_modules_viewed already.
